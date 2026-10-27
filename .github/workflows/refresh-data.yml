@@ -1,0 +1,121 @@
+name: Refresh game data
+
+# Regenerates <Addon>_Tracker_Local_Zones/<data_file> from wago.tools DB2 data by
+# running the caller's tools/<generator> --toc <addon>.toc. Since the generator
+# already discovers the newest game build, it also adds that build's Interface
+# number to the .toc's `## Interface` list when it isn't declared yet (it refuses
+# to run below the 12.1.0 floor). Opens a pull request, waits for CI on it,
+# squash-merges it when green, and dispatches release.yml (a GITHUB_TOKEN merge
+# fires no push event, so the CI-on-main -> release chain would never start).
+#
+# The addon folder is found at runtime (*_Tracker_Local_Zones). The generator is
+# expected to write build / interface / toc_updated to $GITHUB_OUTPUT.
+
+on:
+  workflow_call:
+    inputs:
+      generator:
+        description: "Generator script in tools/, e.g. generate_mount_zones.py"
+        type: string
+        required: true
+      data_file:
+        description: "Generated file in the addon folder, e.g. MountData.lua"
+        type: string
+        required: true
+      branch:
+        description: "PR branch"
+        type: string
+        required: true
+      title:
+        description: "PR title / commit subject"
+        type: string
+        required: true
+      description:
+        description: "Repo-specific PR body paragraphs (what the data covers, guard rails)"
+        type: string
+        default: ""
+      build:
+        description: "Exact wago.tools build (blank = latest 12.x)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write        # dispatch ci.yml on the PR branch (see last step)
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Regenerate ${{ inputs.data_file }}
+        id: generate
+        env:
+          BUILD_INPUT: ${{ inputs.build }}
+          GENERATOR: ${{ inputs.generator }}
+          DATA_FILE: ${{ inputs.data_file }}
+        run: |
+          set -euo pipefail
+          addon="$(ls -d *_Tracker_Local_Zones)"
+          TOC="${addon}/${addon}.toc"
+          {
+            echo "toc=${TOC}"
+            echo "data=${addon}/${DATA_FILE}"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$BUILD_INPUT" ]; then
+            python "tools/${GENERATOR}" --build "$BUILD_INPUT" --toc "$TOC"
+          else
+            python "tools/${GENERATOR}" --toc "$TOC"
+          fi
+
+      - name: Lua syntax check
+        env:
+          DATA: ${{ steps.generate.outputs.data }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends lua5.1
+          lua5.1 -e "assert(loadfile('$DATA'))"
+
+      - name: Open pull request
+        id: cpr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ inputs.branch }}
+          add-paths: |
+            ${{ steps.generate.outputs.data }}
+            ${{ steps.generate.outputs.toc }}
+          title: ${{ inputs.title }}
+          commit-message: |
+            ${{ inputs.title }}
+
+            Regenerated from wago.tools DB2 by the refresh-data workflow.
+            Also adds the build's Interface number to the .toc when it's a
+            new one (see tools/${{ inputs.generator }} --toc).
+          body: |
+            Automated regeneration of `${{ steps.generate.outputs.data }}`
+            from datamined game data. Build and entry counts are in the run summary.
+
+            ${{ inputs.description }}
+
+            If `${{ steps.generate.outputs.build }}` is a newer game version than
+            the .toc already declares, its Interface number
+            (`${{ steps.generate.outputs.interface }}`) was added to the
+            `## Interface` list in this same PR (`toc_updated` =
+            `${{ steps.generate.outputs.toc_updated }}`). The generator refuses to
+            run at all on a build below 12.1.0 (Interface 120100).
+
+            **Auto-merged** once CI passes, then released.
+          labels: automated
+
+      - name: CI, merge, release
+        if: steps.cpr.outputs.pull-request-operation == 'created' || steps.cpr.outputs.pull-request-operation == 'updated'
+        uses: CesttPlays/common-actions/ci-merge-release@main
+        with:
+          branch: ${{ inputs.branch }}
+          pr: ${{ steps.cpr.outputs.pull-request-number }}
+          sha: ${{ steps.cpr.outputs.pull-request-head-sha }}

@@ -1,0 +1,60 @@
+name: CI
+
+# Static analysis + the offline test suites of a "Local Zones" addon repo. None
+# of this is an in-game test (see the caller's tests/README.md) -- it is a
+# regression net for load/runtime errors, the data-generator transforms, and the
+# shape of the shipped data / TOC / locale files.
+#
+# Called from each repo's thin ci.yml (keep its `name: CI`: release.yml's
+# workflow_run trigger matches on that name). Every tests/test_*.py runs.
+
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    name: luacheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lua5.1 luarocks
+          sudo luarocks install luacheck
+
+      - name: Run luacheck
+        run: luacheck .
+
+  smoke:
+    name: headless smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lupa (bundled Lua 5.1 / LuaJIT)
+        run: python -m pip install --quiet lupa
+
+      - name: Run smoke tests
+        run: python tests/run.py
+
+  unit:
+    name: unit tests (generator, data, TOC, locales)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lupa (loads the Lua data / locale files)
+        run: python -m pip install --quiet lupa
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
